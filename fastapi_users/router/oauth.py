@@ -1,20 +1,19 @@
 from typing import Dict, List, Optional, Tuple, Type
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Body, status
 from httpx_oauth.integrations.fastapi import OAuth2AuthorizeCallback
 from httpx_oauth.oauth2 import BaseOAuth2, OAuth2Token
 from pydantic import BaseModel
 
 from fastapi_users import models, schemas
 from fastapi_users.authentication import AuthenticationBackend, Authenticator, Strategy
-from fastapi_users.exceptions import UserAlreadyExists
+from fastapi_users.exceptions import UserAlreadyExists, UserNotExists
 from fastapi_users.jwt import SecretType, decode_jwt, generate_jwt
 from fastapi_users.manager import BaseUserManager, UserManagerDependency
 from fastapi_users.router.common import ErrorCode, ErrorModel
 
 STATE_TOKEN_AUDIENCE = "fastapi-users:oauth-state"
-
 
 class OAuth2AuthorizeResponse(BaseModel):
     authorization_url: str
@@ -151,6 +150,78 @@ def get_oauth_router(
         await user_manager.on_after_login(user, request, response)
         return response
 
+    @router.post(
+        "/token-login",
+        # response_model=user_schema,  # Use a relevant schema for your user model
+        name=f"oauth:{oauth_client.name}.{backend.name}.token-login",
+        description="Login a user with an id_token shared from the frontend.",
+        responses={
+            status.HTTP_400_BAD_REQUEST: {
+                "model": ErrorModel,
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "INVALID_ID_TOKEN": {
+                                "summary": "Invalid ID token.",
+                                "value": {"detail": "Invalid ID token."},
+                            },
+                        }
+                    }
+                },
+            },
+        },
+    )
+    async def token_login(
+        request: Request,
+        id_token: str = Body(..., embed=True),
+        user_manager: BaseUserManager[models.UP, models.ID] = Depends(get_user_manager),
+        strategy: Strategy[models.UP, models.ID] = Depends(backend.get_strategy),
+    ):
+        # Step 1: Verify the id_token with the provider
+        try:
+            account_id, account_email, expires_at = await oauth_client.verify_token(id_token)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid ID token.",
+            )
+
+        # Step 2: Check if the email is provided
+        if account_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ErrorCode.OAUTH_NOT_AVAILABLE_EMAIL,
+            )
+
+        # Step 3: Find or create the user
+        try:
+            user = await user_manager.get_by_oauth_account(oauth_client.name, account_id)
+        except UserNotExists:
+            user = await user_manager.oauth_callback(
+                oauth_client.name,
+                id_token,
+                account_id,
+                account_email,
+                expires_at,
+                None,
+                request,
+                associate_by_email=associate_by_email,
+                is_verified_by_default=is_verified_by_default,
+            )
+
+        # Step 4: Ensure user is active
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ErrorCode.LOGIN_BAD_CREDENTIALS,
+            )
+
+        # Step 5: Authenticate and log in the user
+        response = await backend.login(strategy, user)
+        await user_manager.on_after_login(user, request, response)
+        return response
+
+
     return router
 
 
@@ -268,5 +339,76 @@ def get_oauth_associate_router(
         )
 
         return schemas.model_validate(user_schema, user)
+
+    # @router.post(
+    #     "/login",
+    #     response_model=user_schema,
+    #     name=f"oauth-associate:{oauth_client.name}.login",
+    #     description="Login a user with an id_token shared from the frontend.",
+    #     responses={
+    #         status.HTTP_400_BAD_REQUEST: {
+    #             "model": ErrorModel,
+    #             "content": {
+    #                 "application/json": {
+    #                     "examples": {
+    #                         "INVALID_ID_TOKEN": {
+    #                             "summary": "Invalid ID token.",
+    #                             "value": {"detail": "Invalid ID token."},
+    #                         },
+    #                     }
+    #                 }
+    #             },
+    #         },
+    #     },
+    # )
+    # async def login(
+    #     request: Request,
+    #     id_token: str,
+    #     user_manager: BaseUserManager[models.UP, models.ID] = Depends(get_user_manager),
+    #     strategy: Strategy[models.UP, models.ID] = Depends(backend.get_strategy),
+    # ):
+    #     try:
+    #         token = OAuth2Token(access_token=id_token)
+    #         account_id, account_email = await oauth_client.get_id_email(token.access_token)
+    #     except Exception:
+    #         raise HTTPException(
+    #             status_code=status.HTTP_400_BAD_REQUEST,
+    #             detail="Invalid ID token.",
+    #         )
+
+    #     if account_email is None:
+    #         raise HTTPException(
+    #             status_code=status.HTTP_400_BAD_REQUEST,
+    #             detail=ErrorCode.OAUTH_NOT_AVAILABLE_EMAIL,
+    #         )
+
+    #     try:
+    #         user = await user_manager.oauth_callback(
+    #             oauth_client.name,
+    #             id_token,
+    #             account_id,
+    #             account_email,
+    #             None,
+    #             None,
+    #             request,
+    #             associate_by_email=associate_by_email,
+    #             is_verified_by_default=is_verified_by_default,
+    #         )
+    #     except UserAlreadyExists:
+    #         raise HTTPException(
+    #             status_code=status.HTTP_400_BAD_REQUEST,
+    #             detail=ErrorCode.OAUTH_USER_ALREADY_EXISTS,
+    #         )
+
+    #     if not user.is_active:
+    #         raise HTTPException(
+    #             status_code=status.HTTP_400_BAD_REQUEST,
+    #             detail=ErrorCode.LOGIN_BAD_CREDENTIALS,
+    #         )
+
+    #     # Authenticate
+    #     response = await backend.login(strategy, user)
+    #     await user_manager.on_after_login(user, request, response)
+    #     return response
 
     return router
