@@ -127,8 +127,8 @@ def get_oauth_router(
                 token["access_token"],
                 account_id,
                 account_email,
-                token.get("expires_at"),
-                token.get("refresh_token"),
+                int(token.get("expires_at", 0)),
+                int(token.get("refresh_token", 0)),
                 request,
                 associate_by_email=associate_by_email,
                 is_verified_by_default=is_verified_by_default,
@@ -199,10 +199,10 @@ def get_oauth_router(
         except UserNotExists:
             user = await user_manager.oauth_callback(
                 oauth_client.name,
-                id_token,
+                "null",
                 account_id,
                 account_email,
-                expires_at,
+                int(expires_at),
                 None,
                 request,
                 associate_by_email=associate_by_email,
@@ -333,8 +333,8 @@ def get_oauth_associate_router(
             token["access_token"],
             account_id,
             account_email,
-            token.get("expires_at"),
-            token.get("refresh_token"),
+            int(token.get("expires_at",0)),
+            int(token.get("refresh_token",0)),
             request,
         )
 
